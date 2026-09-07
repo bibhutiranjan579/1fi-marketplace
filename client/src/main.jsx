@@ -6,7 +6,7 @@ import { MarketplaceProvider } from './context/MarketplaceContext.jsx';
 import './styles.css';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
-  <BrowserRouter basename="/1fi-marketplace">
+  <BrowserRouter>
     <MarketplaceProvider>
       <App />
     </MarketplaceProvider>
