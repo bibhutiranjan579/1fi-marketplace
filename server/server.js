@@ -7,6 +7,8 @@ import { products as demoProducts } from './data/products.js';
 
 const app = express();
 const port = process.env.PORT || 5001;
+
+// Start with demo catalog
 let productSource = demoProducts;
 
 const searchAliases = {
@@ -22,52 +24,244 @@ const searchAliases = {
   vacuum: ['cleaner', 'appliances']
 };
 
-const normalize = (value) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-const searchTokens = (value) => normalize(value).split(' ').filter(Boolean).flatMap((token) => [token, ...(searchAliases[token] || [])]);
-const searchableProductText = (product) => normalize([product.name, product.brand, product.category, product.description, ...(product.variants || []).map((variant) => variant.value), ...Object.values(product.specifications || {})].join(' '));
+const normalize = (value) =>
+  value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+const searchTokens = (value) =>
+  normalize(value)
+    .split(' ')
+    .filter(Boolean)
+    .flatMap((token) => [
+      token,
+      ...(searchAliases[token] || [])
+    ]);
+
+const searchableProductText = (product) =>
+  normalize(
+    [
+      product.name,
+      product.brand,
+      product.category,
+      product.description,
+      ...(product.variants || []).map((variant) => variant.value),
+      ...Object.values(product.specifications || {})
+    ].join(' ')
+  );
+
 const matchesSearch = (product, search) => {
   if (!search) return true;
+
   const text = searchableProductText(product);
-  return searchTokens(search).some((token) => text.includes(token));
+
+  return searchTokens(search).some((token) =>
+    text.includes(token)
+  );
 };
 
-app.use(cors({ origin: process.env.CLIENT_URL || 'http://localhost:5173' }));
+// ----------------------------------------------------
+// Middleware
+// ----------------------------------------------------
+
+app.use(
+  cors({
+    origin: process.env.CLIENT_URL || 'http://localhost:5173'
+  })
+);
+
 app.use(express.json());
 
+// ----------------------------------------------------
+// Get products
+// ----------------------------------------------------
+
 const getProducts = async ({ category, search }) => {
-  if (mongoose.connection.readyState === 1) {
-    const query = { isActive: true };
-    if (category && category !== 'all') query.category = category.toLowerCase();
-    if (search) {
-      const terms = searchTokens(search).map((term) => new RegExp(term, 'i'));
-      query.$or = terms.flatMap((term) => [{ name: term }, { brand: term }, { category: term }, { description: term }]);
+
+  // Use MongoDB only when it actually contains products.
+  if (
+    mongoose.connection.readyState === 1 &&
+    productSource !== demoProducts
+  ) {
+    const query = {
+      isActive: true
+    };
+
+    if (category && category !== 'all') {
+      query.category = category.toLowerCase();
     }
-    return Product.find(query).sort({ createdAt: -1 }).lean();
+
+    if (search) {
+      const terms = searchTokens(search).map(
+        (term) => new RegExp(term, 'i')
+      );
+
+      query.$or = terms.flatMap((term) => [
+        { name: term },
+        { brand: term },
+        { category: term },
+        { description: term }
+      ]);
+    }
+
+    return Product.find(query)
+      .sort({ createdAt: -1 })
+      .lean();
   }
-  return productSource.filter((product) => (!category || category === 'all' || product.category === category) && matchesSearch(product, search));
+
+  // Fallback to dummy catalog
+  return productSource.filter(
+    (product) =>
+      (!category ||
+        category === 'all' ||
+        product.category === category) &&
+      matchesSearch(product, search)
+  );
 };
 
-app.get('/api/health', (_req, res) => res.json({ status: 'ok', database: mongoose.connection.readyState === 1 ? 'mongodb' : 'demo-data' }));
+// ----------------------------------------------------
+// Health check
+// ----------------------------------------------------
+
+app.get('/api/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    database:
+      mongoose.connection.readyState === 1 &&
+      productSource !== demoProducts
+        ? 'mongodb'
+        : 'demo-data'
+  });
+});
+
+// ----------------------------------------------------
+// Categories
+// ----------------------------------------------------
+
 app.get('/api/categories', async (_req, res, next) => {
-  try { res.json([...new Set((await getProducts({})).map((product) => product.category))]); } catch (error) { next(error); }
+  try {
+    const products = await getProducts({});
+
+    res.json([
+      ...new Set(
+        products.map((product) => product.category)
+      )
+    ]);
+  } catch (error) {
+    next(error);
+  }
 });
+
+// ----------------------------------------------------
+// Products
+// ----------------------------------------------------
+
 app.get('/api/products', async (req, res, next) => {
-  try { res.json(await getProducts({ category: req.query.category, search: req.query.search })); } catch (error) { next(error); }
+  try {
+    const products = await getProducts({
+      category: req.query.category,
+      search: req.query.search
+    });
+
+    res.json(products);
+  } catch (error) {
+    next(error);
+  }
 });
+
+// ----------------------------------------------------
+// Product by ID
+// ----------------------------------------------------
+
 app.get('/api/products/:id', async (req, res, next) => {
   try {
-    const product = mongoose.connection.readyState === 1 ? await Product.findOne({ _id: req.params.id, isActive: true }).lean() : productSource.find((item) => item._id === req.params.id || item.name.toLowerCase().replaceAll(' ', '-') === req.params.id);
-    if (!product) return res.status(404).json({ message: 'Product not found' });
+    let product;
+
+    if (
+      mongoose.connection.readyState === 1 &&
+      productSource !== demoProducts
+    ) {
+      product = await Product.findOne({
+        _id: req.params.id,
+        isActive: true
+      }).lean();
+    } else {
+      product = productSource.find(
+        (item) =>
+          item._id === req.params.id ||
+          item.name
+            .toLowerCase()
+            .replaceAll(' ', '-') === req.params.id
+      );
+    }
+
+    if (!product) {
+      return res.status(404).json({
+        message: 'Product not found'
+      });
+    }
+
     res.json(product);
-  } catch (error) { next(error); }
+  } catch (error) {
+    next(error);
+  }
 });
-app.use((error, _req, res, _next) => res.status(500).json({ message: 'Unable to complete request' }));
+
+// ----------------------------------------------------
+// Error handler
+// ----------------------------------------------------
+
+app.use((error, _req, res, _next) => {
+  console.error(error);
+
+  res.status(500).json({
+    message: 'Unable to complete request'
+  });
+});
+
+// ----------------------------------------------------
+// Start server
+// ----------------------------------------------------
 
 const start = async () => {
   if (process.env.MONGODB_URI) {
-    try { await mongoose.connect(process.env.MONGODB_URI); productSource = await Product.find({ isActive: true }).lean(); console.log('MongoDB connected'); }
-    catch (error) { console.warn('MongoDB unavailable, serving demo data'); }
-  } else console.warn('MONGODB_URI missing, serving demo data');
-  app.listen(port, () => console.log(`API listening on http://localhost:${port}`));
+    try {
+      await mongoose.connect(process.env.MONGODB_URI);
+
+      const databaseProducts = await Product.find({
+        isActive: true
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      if (databaseProducts.length > 0) {
+        // MongoDB has products → use MongoDB
+        productSource = databaseProducts;
+
+        console.log(
+          `MongoDB connected: ${databaseProducts.length} products loaded`
+        );
+      } else {
+        // MongoDB is connected but empty → use demo catalog
+        console.log(
+          `MongoDB connected but empty. Using ${demoProducts.length} demo products`
+        );
+      }
+
+    } catch (error) {
+      // MongoDB failed → use demo catalog
+      console.warn(
+        'MongoDB unavailable, serving demo data:',
+        error.message
+      );
+    }
+  } else {
+    console.warn(
+      `MONGODB_URI missing, serving ${demoProducts.length} demo products`
+    );
+  }
+
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`API listening on port ${port}`);
+  });
 };
+
 start();
